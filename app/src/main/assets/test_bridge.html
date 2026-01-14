@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebView Bridge Demo</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 600px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            color: white;
+            text-align: center;
+            margin-bottom: 20px;
+            font-size: 24px;
+        }
+
+        .card {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 16px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        .card h2 {
+            color: #333;
+            font-size: 18px;
+            margin-bottom: 8px;
+        }
+
+        .card p {
+            color: #666;
+            font-size: 14px;
+            margin-bottom: 12px;
+        }
+
+        button {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-size: 16px;
+            cursor: pointer;
+            width: 100%;
+            margin-bottom: 10px;
+            transition: background 0.2s;
+        }
+
+        button:hover {
+            background: #5a6fd6;
+        }
+
+        button:active {
+            background: #4c5ec2;
+        }
+
+        .result {
+            background: #f5f5f5;
+            border-radius: 8px;
+            padding: 12px;
+            margin-top: 12px;
+            font-family: monospace;
+            font-size: 13px;
+            white-space: pre-wrap;
+            word-break: break-all;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        .result.success {
+            border-left: 4px solid #4caf50;
+        }
+
+        .result.error {
+            border-left: 4px solid #f44336;
+        }
+
+        .result.pending {
+            border-left: 4px solid #ff9800;
+            color: #666;
+        }
+
+        input[type="text"] {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 16px;
+            margin-bottom: 10px;
+        }
+
+        input[type="text"]:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .status {
+            text-align: center;
+            padding: 10px;
+            border-radius: 8px;
+            margin-bottom: 16px;
+        }
+
+        .status.connected {
+            background: #e8f5e9;
+            color: #2e7d32;
+        }
+
+        .status.disconnected {
+            background: #ffebee;
+            color: #c62828;
+        }
+
+        .status.initializing {
+            background: #fff3e0;
+            color: #e65100;
+        }
+
+        .row {
+            display: flex;
+            gap: 10px;
+        }
+
+        .row button {
+            flex: 1;
+        }
+
+        .code-example {
+            background: #263238;
+            color: #aed581;
+            padding: 10px;
+            border-radius: 6px;
+            font-family: monospace;
+            font-size: 11px;
+            margin-top: 8px;
+            overflow-x: auto;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Native Bridge Demo</h1>
+
+        <div id="status" class="status initializing">
+            Initializing bridge...
+        </div>
+
+        <!-- Ping Test -->
+        <div class="card">
+            <h2>Ping Test</h2>
+            <p>Test basic connectivity with native code</p>
+            <button onclick="testPing()">Send Ping</button>
+            <div id="pingResult" class="result pending">Click button to test</div>
+            <div class="code-example">Native.postMessage({ method: 'ping' })</div>
+        </div>
+
+        <!-- Device Info -->
+        <div class="card">
+            <h2>Device Information</h2>
+            <p>Get device manufacturer, model, OS version</p>
+            <button onclick="getDeviceInfo()">Get Device Info</button>
+            <div id="deviceResult" class="result pending">Click button to fetch</div>
+        </div>
+
+        <!-- App Info -->
+        <div class="card">
+            <h2>App Information</h2>
+            <p>Get app package name, version</p>
+            <button onclick="getAppInfo()">Get App Info</button>
+            <div id="appResult" class="result pending">Click button to fetch</div>
+        </div>
+
+        <!-- Toast -->
+        <div class="card">
+            <h2>Show Toast</h2>
+            <p>Display a native Android toast message</p>
+            <input type="text" id="toastInput" placeholder="Enter toast message..." value="Hello from WebView!">
+            <button onclick="showToast()">Show Toast</button>
+            <div id="toastResult" class="result pending">Enter message and click button</div>
+        </div>
+
+        <!-- Preferences -->
+        <div class="card">
+            <h2>Storage (SharedPreferences)</h2>
+            <p>Save and retrieve data from native storage</p>
+            <input type="text" id="prefKey" placeholder="Key" value="username">
+            <input type="text" id="prefValue" placeholder="Value" value="John Doe">
+            <div class="row">
+                <button onclick="savePreference()">Save</button>
+                <button onclick="loadPreference()">Load</button>
+            </div>
+            <div id="prefResult" class="result pending">Use buttons to save/load data</div>
+            <div class="code-example">Native.postMessage({ method: 'setPreference', args: { key, value } })</div>
+        </div>
+
+        <!-- Clipboard -->
+        <div class="card">
+            <h2>Copy to Clipboard</h2>
+            <p>Copy text to system clipboard</p>
+            <input type="text" id="clipboardInput" placeholder="Text to copy..." value="Copied from WebView!">
+            <button onclick="copyToClipboard()">Copy to Clipboard</button>
+            <div id="clipboardResult" class="result pending">Enter text and click button</div>
+        </div>
+
+        <!-- Share -->
+        <div class="card">
+            <h2>Share Content</h2>
+            <p>Open native share dialog</p>
+            <input type="text" id="shareText" placeholder="Text to share..." value="Check out this awesome app!">
+            <input type="text" id="shareUrl" placeholder="URL (optional)" value="https://example.com">
+            <button onclick="shareContent()">Share</button>
+            <div id="shareResult" class="result pending">Enter content and click share</div>
+        </div>
+    </div>
+
+    <script>
+        /**
+         * Native Bridge Usage
+         *
+         * The native Android code injects `window.Native` at document start.
+         * This object provides:
+         *
+         * - Native.initializeAsync() - Wait for bridge to be ready
+         * - Native.postMessage({ method, args }) - Send request, returns Promise
+         *
+         * The underlying NativeBridge is the raw bridge injected by
+         * WebViewCompat.addWebMessageListener(), but you should use
+         * the Native wrapper for the Promise-based API.
+         */
+
+        let bridgeReady = false;
+
+        // Initialize when page loads
+        document.addEventListener('DOMContentLoaded', async function() {
+            await initializeBridge();
+        });
+
+        async function initializeBridge() {
+            updateStatus('initializing');
+
+            // Wait for Native to be available (injected at document start)
+            let attempts = 0;
+            while (typeof window.Native === 'undefined' && attempts < 50) {
+                await sleep(100);
+                attempts++;
+            }
+
+            if (typeof window.Native === 'undefined') {
+                console.error('Native bridge not available after waiting');
+                updateStatus('disconnected');
+                return;
+            }
+
+            try {
+                await window.Native.initializeAsync();
+                bridgeReady = true;
+                updateStatus('connected');
+                console.log('Bridge initialized successfully');
+            } catch (error) {
+                console.error('Failed to initialize bridge:', error);
+                updateStatus('disconnected');
+            }
+        }
+
+        function sleep(ms) {
+            return new Promise(resolve => setTimeout(resolve, ms));
+        }
+
+        function updateStatus(state) {
+            const statusEl = document.getElementById('status');
+            switch (state) {
+                case 'connected':
+                    statusEl.className = 'status connected';
+                    statusEl.textContent = 'Bridge Connected';
+                    break;
+                case 'disconnected':
+                    statusEl.className = 'status disconnected';
+                    statusEl.textContent = 'Bridge Not Available';
+                    break;
+                case 'initializing':
+                    statusEl.className = 'status initializing';
+                    statusEl.textContent = 'Initializing bridge...';
+                    break;
+            }
+        }
+
+        function updateResult(elementId, data, isError = false) {
+            const el = document.getElementById(elementId);
+            el.className = `result ${isError ? 'error' : 'success'}`;
+            el.textContent = typeof data === 'object'
+                ? JSON.stringify(data, null, 2)
+                : data;
+        }
+
+        function setLoading(elementId, message) {
+            const el = document.getElementById(elementId);
+            el.className = 'result pending';
+            el.textContent = message;
+        }
+
+        // =====================
+        // Bridge Methods
+        // =====================
+
+        async function testPing() {
+            if (!bridgeReady) {
+                updateResult('pingResult', 'Bridge not ready', true);
+                return;
+            }
+
+            setLoading('pingResult', 'Sending ping...');
+
+            try {
+                const result = await window.Native.postMessage({ method: 'ping' });
+                updateResult('pingResult', result);
+            } catch (error) {
+                updateResult('pingResult', `Error: ${error.message || error}`, true);
+            }
+        }
+
+        async function getDeviceInfo() {
+            if (!bridgeReady) {
+                updateResult('deviceResult', 'Bridge not ready', true);
+                return;
+            }
+
+            setLoading('deviceResult', 'Fetching device info...');
+
+            try {
+                const result = await window.Native.postMessage({ method: 'getDeviceInfo' });
+                updateResult('deviceResult', result);
+            } catch (error) {
+                updateResult('deviceResult', `Error: ${error.message || error}`, true);
+            }
+        }
+
+        async function getAppInfo() {
+            if (!bridgeReady) {
+                updateResult('appResult', 'Bridge not ready', true);
+                return;
+            }
+
+            setLoading('appResult', 'Fetching app info...');
+
+            try {
+                const result = await window.Native.postMessage({ method: 'getAppInfo' });
+                updateResult('appResult', result);
+            } catch (error) {
+                updateResult('appResult', `Error: ${error.message || error}`, true);
+            }
+        }
+
+        async function showToast() {
+            if (!bridgeReady) {
+                updateResult('toastResult', 'Bridge not ready', true);
+                return;
+            }
+
+            const message = document.getElementById('toastInput').value.trim();
+            if (!message) {
+                updateResult('toastResult', 'Please enter a message', true);
+                return;
+            }
+
+            setLoading('toastResult', 'Showing toast...');
+
+            try {
+                const result = await window.Native.postMessage({
+                    method: 'showToast',
+                    args: { message: message, duration: 'short' }
+                });
+                updateResult('toastResult', result);
+            } catch (error) {
+                updateResult('toastResult', `Error: ${error.message || error}`, true);
+            }
+        }
+
+        async function savePreference() {
+            if (!bridgeReady) {
+                updateResult('prefResult', 'Bridge not ready', true);
+                return;
+            }
+
+            const key = document.getElementById('prefKey').value.trim();
+            const value = document.getElementById('prefValue').value.trim();
+
+            if (!key) {
+                updateResult('prefResult', 'Key is required', true);
+                return;
+            }
+
+            setLoading('prefResult', 'Saving...');
+
+            try {
+                const result = await window.Native.postMessage({
+                    method: 'setPreference',
+                    args: { key: key, value: value }
+                });
+                updateResult('prefResult', result);
+            } catch (error) {
+                updateResult('prefResult', `Error: ${error.message || error}`, true);
+            }
+        }
+
+        async function loadPreference() {
+            if (!bridgeReady) {
+                updateResult('prefResult', 'Bridge not ready', true);
+                return;
+            }
+
+            const key = document.getElementById('prefKey').value.trim();
+
+            if (!key) {
+                updateResult('prefResult', 'Key is required', true);
+                return;
+            }
+
+            setLoading('prefResult', 'Loading...');
+
+            try {
+                const result = await window.Native.postMessage({
+                    method: 'getPreference',
+                    args: { key: key, defaultValue: '' }
+                });
+                updateResult('prefResult', result);
+                // Update the value field with loaded value
+                if (result.value) {
+                    document.getElementById('prefValue').value = result.value;
+                }
+            } catch (error) {
+                updateResult('prefResult', `Error: ${error.message || error}`, true);
+            }
+        }
+
+        async function copyToClipboard() {
+            if (!bridgeReady) {
+                updateResult('clipboardResult', 'Bridge not ready', true);
+                return;
+            }
+
+            const text = document.getElementById('clipboardInput').value.trim();
+
+            if (!text) {
+                updateResult('clipboardResult', 'Text is required', true);
+                return;
+            }
+
+            setLoading('clipboardResult', 'Copying...');
+
+            try {
+                const result = await window.Native.postMessage({
+                    method: 'copyToClipboard',
+                    args: { text: text }
+                });
+                updateResult('clipboardResult', result);
+            } catch (error) {
+                updateResult('clipboardResult', `Error: ${error.message || error}`, true);
+            }
+        }
+
+        async function shareContent() {
+            if (!bridgeReady) {
+                updateResult('shareResult', 'Bridge not ready', true);
+                return;
+            }
+
+            const text = document.getElementById('shareText').value.trim();
+            const url = document.getElementById('shareUrl').value.trim();
+
+            if (!text && !url) {
+                updateResult('shareResult', 'Text or URL is required', true);
+                return;
+            }
+
+            setLoading('shareResult', 'Opening share dialog...');
+
+            try {
+                const result = await window.Native.postMessage({
+                    method: 'share',
+                    args: { title: 'Share', text: text, url: url }
+                });
+                updateResult('shareResult', result);
+            } catch (error) {
+                updateResult('shareResult', `Error: ${error.message || error}`, true);
+            }
+        }
+    </script>
+</body>
+</html>
