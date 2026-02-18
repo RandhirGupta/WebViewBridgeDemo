@@ -7,8 +7,9 @@ A sample Android project demonstrating secure communication between WebView and 
 - Secure WebView-to-Native communication
 - Origin whitelisting
 - Promise-based JavaScript API
-- Request/Response pattern with unique IDs
-- Three demo endpoints: ping, getDeviceInfo, echo
+- Request/Response pattern with unique callback IDs
+- Early script injection via `addDocumentStartJavaScript`
+- Eight demo endpoints: ping, getDeviceInfo, getAppInfo, showToast, getPreference, setPreference, copyToClipboard, share
 
 ## Project Structure
 
@@ -23,7 +24,7 @@ WebViewBridgeDemo/
 │   │   └── res/
 │   │       └── layout/activity_main.xml
 │   └── build.gradle.kts
-├── ARTICLE_CORRECTED.md                  # Corrected article
+├── ARTICLE.md                            # Full technical article
 └── README.md
 ```
 
@@ -59,13 +60,13 @@ NativeBridge.postMessage('{"action":"ping"}');
 2. Sync Gradle files
 3. Run on device/emulator (API 24+)
 
-## Key Corrections from Original Article
+## Key Points
 
-1. **No need for addDocumentStartJavaScript** - The `addWebMessageListener` automatically injects the bridge
-2. **Use NativeBridge.onmessage** - Not `window.addEventListener("message", ...)`
-3. **NativeBridge.postMessage** - Not `window.postMessage()`
+1. **Use `addDocumentStartJavaScript`** to inject the bridge wrapper early — avoids race conditions with page scripts
+2. **Use `NativeBridge.onmessage`** — Not `window.addEventListener("message", ...)`
+3. **Use `NativeBridge.postMessage`** — Not `window.postMessage()`
 
-See [ARTICLE_CORRECTED.md](ARTICLE_CORRECTED.md) for the full corrected article.
+See [ARTICLE.md](ARTICLE.md) for the full technical article.
 
 ## Requirements
 

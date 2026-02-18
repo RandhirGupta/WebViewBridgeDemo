@@ -1,20 +1,10 @@
 # Beyond addJavascriptInterface: Building a Secure WebView Bridge in Android
 
-When developing hybrid Android applications, establishing a secure communication channel between the WebView and the native layer is essential. This bridge allows web pages to access native capabilities such as device info, storage, or sensors — while maintaining security.
+If you've worked on hybrid Android apps, you've probably used `addJavascriptInterface` to let your WebView talk to native code. It works, but it has a well-known problem: on Android versions before 4.2, any JavaScript running in the WebView could exploit the injected object via reflection to call arbitrary methods. Even on newer versions, every `@JavascriptInterface` method you expose is directly callable by any script in the WebView — including scripts you didn't write.
 
-The key question is: how can we expose native functionality without compromising security?
+AndroidX WebKit offers a better alternative: `WebViewCompat.addWebMessageListener()`. Instead of exposing Java objects directly, it uses message-passing. This article covers how it works and how to build a production-ready bridge on top of it.
 
-## Why Not Just Use addJavascriptInterface?
-
-For years, Android developers used `addJavascriptInterface` to bridge WebView and native code. However, this method has significant security risks — especially on Android versions before 4.2 — where malicious JavaScript could exploit injected objects to invoke arbitrary methods via reflection.
-
-Even on newer versions, `addJavascriptInterface` exposes your native methods directly to any script running in the WebView, making it difficult to control access.
-
-## The Modern Solution: WebViewCompat.addWebMessageListener
-
-AndroidX WebKit provides `WebViewCompat.addWebMessageListener()` — a secure alternative that uses message-passing instead of direct method exposure.
-
-### Method Signature
+## The API
 
 ```kotlin
 WebViewCompat.addWebMessageListener(
@@ -25,29 +15,12 @@ WebViewCompat.addWebMessageListener(
 )
 ```
 
-### Parameters
+This injects a JavaScript object (named `jsObjectName`) into the global scope of every page that matches your origin rules. The object exposes two things:
 
-- **webView** *(WebView)* — The WebView instance to attach the listener to
-- **jsObjectName** *(String)* — Name of the JavaScript object to inject (e.g., "NativeBridge")
-- **allowedOriginRules** *(Set\<String\>)* — Origins permitted to use the bridge
-- **listener** *(WebMessageListener)* — Callback that handles incoming messages
+- `postMessage(String)` — sends a string from JavaScript to your native listener
+- `onmessage` — a handler that receives strings sent back from native
 
-### What This Method Does
-
-When you call `addWebMessageListener()`:
-
-1. **Injects a JavaScript object** named `jsObjectName` into the global scope of the web page
-2. **Makes it available immediately** when the page begins to load
-3. **Injects into every navigation** that matches the allowed origin rules
-4. **Provides two-way communication** via `postMessage()` and `onmessage`
-
-The injected JavaScript object provides:
-- `postMessage(String)` — Send messages from JavaScript to native
-- `onmessage` — Handler to receive messages from native
-
-## WebMessageListener Interface
-
-The listener callback receives messages sent by JavaScript:
+The native listener looks like this:
 
 ```kotlin
 interface WebMessageListener {
@@ -61,111 +34,55 @@ interface WebMessageListener {
 }
 ```
 
-### Callback Parameters
+When JavaScript calls `NativeBridge.postMessage("something")`, your listener fires. You read the message from `message.data`, do whatever you need, and respond using `replyProxy.postMessage("response")`. The response arrives on the JavaScript side via the `onmessage` handler.
 
-- **view** *(WebView)* — The WebView that received the message
-- **message** *(WebMessageCompat)* — The message content (access via `message.data`)
-- **sourceOrigin** *(Uri)* — The origin of the page that sent the message
-- **isMainFrame** *(Boolean)* — True if message came from main frame, false if from iframe
-- **replyProxy** *(JavaScriptReplyProxy)* — Used to send responses back to JavaScript
+## Why this is better than addJavascriptInterface
 
-### JavaScriptReplyProxy
+**No reflection exposure.** There's no Java object in the WebView's JavaScript context. Attackers can't use reflection to reach beyond what you explicitly handle in your listener.
 
-The `replyProxy` parameter is your channel to respond to JavaScript. Call `replyProxy.postMessage(String)` to send data back. The response triggers the `onmessage` handler on the JavaScript side.
+**Origin whitelisting.** You specify which origins can access the bridge. If a malicious page gets loaded in your WebView, it simply can't talk to native code unless its origin is in your allowlist.
 
-## Origin Rules Format
+**Frame awareness.** The `isMainFrame` parameter tells you whether the message came from the main frame or an iframe, so you can reject messages from iframes if you want.
 
-The `allowedOriginRules` parameter controls which pages can access the bridge. Each rule must follow this format:
+**String-only communication.** All data passes as strings. You parse what you expect and ignore everything else. This gives you a narrow, auditable API surface.
 
-```
-SCHEME "://" [ HOSTNAME_PATTERN [ ":" PORT ] ]
-```
+## Origin rules
 
-### Valid Origin Rule Examples
+Each rule follows the format `SCHEME "://" HOSTNAME_PATTERN [ ":" PORT ]`:
 
-- `https://example.com` — Only exact match: `https://example.com`
-- `https://*.example.com` — All subdomains: `www.example.com`, `api.example.com` (but not `example.com` itself)
-- `https://example.com:8080` — Only `example.com` on port 8080
-- `http://192.168.1.1` — Specific IP address
-- `http://[::1]` — IPv6 localhost
-- `my-app-scheme://` — Custom URL schemes
-- `*` — All origins (not recommended for production)
+- `https://example.com` — exact match only
+- `https://*.example.com` — subdomains of example.com (not example.com itself)
+- `https://example.com:8080` — specific port
+- `http://192.168.1.1` — IP address
+- `*` — matches everything (don't use this in production)
 
-## Comparison: addJavascriptInterface vs addWebMessageListener
+## Building an actual bridge
 
-**Communication** — `addJavascriptInterface` uses direct method calls. `addWebMessageListener` uses string message passing.
+The raw `postMessage`/`onmessage` API only passes strings back and forth. For a real app, you need a protocol on top of it — something that lets you make named method calls, pass arguments, and match responses to requests.
 
-**Security** — `addJavascriptInterface` is vulnerable to reflection attacks. `addWebMessageListener` has no reflection exposure.
-
-**Origin Control** — `addJavascriptInterface` has none. `addWebMessageListener` has built-in whitelisting.
-
-**Data Format** — `addJavascriptInterface` accepts any Java object. `addWebMessageListener` uses strings only (JSON recommended).
-
-**Response Pattern** — `addJavascriptInterface` uses return values. `addWebMessageListener` uses async responses via `replyProxy`.
-
-**API Level** — `addJavascriptInterface` works from API 1+. `addWebMessageListener` requires AndroidX WebKit.
-
-## Advantages of addWebMessageListener
-
-### 1. Origin-Based Security
-
-Only pages from whitelisted domains can access the bridge. Even if a malicious page is loaded in your WebView, it cannot communicate with native code unless you explicitly allow its origin.
-
-### 2. No Reflection Vulnerabilities
-
-Unlike `addJavascriptInterface`, there's no Java object exposed to JavaScript. Attackers cannot use reflection to access methods beyond what you explicitly handle in your listener.
-
-### 3. String-Only Communication
-
-All data passes as strings. You control exactly what actions are available by parsing message content. This creates a clear, auditable API surface.
-
-### 4. Frame Awareness
-
-The `isMainFrame` parameter lets you restrict communication to the main frame only, preventing potentially malicious iframes from accessing native functionality.
-
-### 5. Immediate Availability
-
-The JavaScript object is available immediately when the page begins to load — no need to wait for page load events or worry about race conditions.
-
-## Putting It All Together: A Practical Implementation
-
-The API reference above covers the building blocks. Now let's see how to combine them into a real, usable bridge with a structured request/response protocol and a Promise-based JavaScript API.
-
-### Step 1: Define a Request/Response Protocol
-
-Raw string messages aren't enough for real apps. Define a JSON protocol so JavaScript can make named method calls and receive structured responses:
-
-**Request** (JavaScript → Native)
+Here's what I landed on. Each message is JSON with a `callbackId`, a `method` name, and an `args` object:
 
 ```json
-{
-  "callbackId": "cb_1_1708345123456",
-  "method": "getDeviceInfo",
-  "args": {}
-}
+{"callbackId": "cb_1_1708345123456", "method": "getDeviceInfo", "args": {}}
 ```
 
-**Success Response** (Native → JavaScript)
+The native side parses this, routes to the right handler, and sends back a response with the same `callbackId`:
 
 ```json
-{
-  "callbackId": "cb_1_1708345123456",
-  "result": { "manufacturer": "Google", "model": "Pixel 8" }
-}
+{"callbackId": "cb_1_1708345123456", "result": {"manufacturer": "Google", "model": "Pixel 8"}}
 ```
 
-**Error Response** (Native → JavaScript)
+Or on error:
 
 ```json
-{
-  "callbackId": "cb_1_1708345123456",
-  "error": { "message": "Unknown method", "code": "BRIDGE_ERROR" }
-}
+{"callbackId": "cb_1_1708345123456", "error": {"message": "Unknown method", "code": "BRIDGE_ERROR"}}
 ```
 
-The `callbackId` ties each response back to the original request, enabling concurrent operations without mixups.
+The `callbackId` is what makes concurrent calls work — without it, you can't tell which response belongs to which request.
 
-### Step 2: Handle Messages and Route Methods on the Native Side
+### Native side
+
+The message handler parses the JSON and routes based on the `method` field:
 
 ```kotlin
 private fun onMessageReceived(
@@ -191,12 +108,12 @@ private fun onMessageReceived(
         }
     }
 }
+```
 
-private fun sendSuccess(
-    replyProxy: JavaScriptReplyProxy,
-    callbackId: String,
-    result: JSONObject
-) {
+Sending responses:
+
+```kotlin
+private fun sendSuccess(replyProxy: JavaScriptReplyProxy, callbackId: String, result: JSONObject) {
     val response = JSONObject().apply {
         put("callbackId", callbackId)
         put("result", result)
@@ -204,11 +121,7 @@ private fun sendSuccess(
     replyProxy.postMessage(response.toString())
 }
 
-private fun sendError(
-    replyProxy: JavaScriptReplyProxy,
-    callbackId: String,
-    errorMessage: String
-) {
+private fun sendError(replyProxy: JavaScriptReplyProxy, callbackId: String, errorMessage: String) {
     val response = JSONObject().apply {
         put("callbackId", callbackId)
         put("error", JSONObject().apply {
@@ -220,9 +133,9 @@ private fun sendError(
 }
 ```
 
-### Step 3: Build a Promise-Based JavaScript Wrapper
+### JavaScript side
 
-The raw `NativeBridge.postMessage()` API only sends strings. Wrapping it with Promises gives a clean, async/await-friendly API for the web layer:
+On the web side, I wrapped the low-level `NativeBridge` object with a Promise-based API. JavaScript calls go through `window.Native.postMessage()`, which generates a unique callback ID, stashes the Promise's resolve/reject in a map, and sends the JSON to native. When the response comes back, the `onmessage` handler looks up the callback ID and resolves or rejects the corresponding Promise.
 
 ```javascript
 (function() {
@@ -235,7 +148,6 @@ The raw `NativeBridge.postMessage()` API only sends strings. Wrapping it with Pr
         return 'cb_' + (++counter) + '_' + Date.now();
     }
 
-    // Listen for native responses
     NativeBridge.onmessage = function(event) {
         var response = JSON.parse(event.data);
         var cb = callbacks[response.callbackId];
@@ -249,13 +161,11 @@ The raw `NativeBridge.postMessage()` API only sends strings. Wrapping it with Pr
         }
     };
 
-    // Public API
     window.Native = {
         postMessage: function(message) {
             return new Promise(function(resolve, reject) {
                 var id = generateId();
 
-                // Timeout after 30 seconds
                 setTimeout(function() {
                     if (callbacks[id]) {
                         delete callbacks[id];
@@ -278,43 +188,39 @@ The raw `NativeBridge.postMessage()` API only sends strings. Wrapping it with Pr
 })();
 ```
 
-Now calling native methods from JavaScript is clean and intuitive:
+With this wrapper, calling native code from JavaScript looks like any other async call:
 
 ```javascript
-// Simple call
 const info = await window.Native.postMessage({ method: 'getDeviceInfo' });
 console.log(info.manufacturer, info.model);
 
-// Call with arguments
 await window.Native.postMessage({
     method: 'showToast',
     args: { message: 'Hello from WebView!', duration: 'short' }
 });
 ```
 
-### Step 4: Inject the Wrapper Early with addDocumentStartJavaScript
+## Injecting the wrapper early
 
-There's a timing problem: the web page may try to call `window.Native` before the bridge wrapper has been injected. AndroidX WebKit solves this with `addDocumentStartJavaScript()`, which injects scripts at document start — before any page scripts execute:
+There's a timing issue. The web page might try to use `window.Native` before the wrapper script has been injected. If you inject it in `onPageFinished`, you're too late — page scripts may have already run.
+
+`addDocumentStartJavaScript()` solves this. It injects your script at document start, before any page scripts execute:
 
 ```kotlin
-private fun injectBridgeWrapper() {
-    if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
-        WebViewCompat.addDocumentStartJavaScript(
-            webView,
-            BRIDGE_WRAPPER_SCRIPT,  // The JS wrapper from Step 3
-            ALLOWED_ORIGINS
-        )
-    }
+if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+    WebViewCompat.addDocumentStartJavaScript(webView, BRIDGE_WRAPPER_SCRIPT, ALLOWED_ORIGINS)
 }
 ```
 
-This ensures `window.Native` is available the moment any page script runs — no race conditions, no `DOMContentLoaded` waiting.
+This requires AndroidX WebKit 1.6.0+ and a compatible System WebView.
 
-> **Note:** `addDocumentStartJavaScript` requires AndroidX WebKit 1.6.0+ and a compatible Android System WebView.
+## Watch out: NativeBridge.postMessage vs window.postMessage
 
-## Feature Support
+These are completely unrelated APIs. `window.postMessage()` is the browser's cross-origin messaging between frames and windows. `NativeBridge.postMessage()` is the WebView bridge to native Android code. Don't mix them up — the event formats and behavior are different.
 
-This API requires checking feature availability before use:
+## Feature support
+
+Both APIs require a runtime feature check before use:
 
 ```kotlin
 if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
@@ -322,52 +228,30 @@ if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
 }
 ```
 
-## Important: NativeBridge.postMessage vs window.postMessage
-
-A common source of confusion: the injected `NativeBridge.postMessage()` is completely different from the browser's `window.postMessage()`.
-
-- `window.postMessage()` — Browser's cross-origin messaging between frames/windows
-- `NativeBridge.postMessage()` — WebView bridge for JavaScript to native Android communication
-
-They are unrelated APIs. Don't mix them up!
-
 ## Requirements
 
-- **AndroidX WebKit** — 1.6.0+ (for `addDocumentStartJavaScript`)
-- **Android System WebView** — 74+
-- **Minimum SDK** — 24
-
-Add the dependency:
+- AndroidX WebKit 1.6.0+
+- Android System WebView 74+
+- minSdk 24
 
 ```kotlin
 implementation("androidx.webkit:webkit:1.9.0")
 ```
 
-## Best Practices
+## Things to keep in mind
 
-1. **Whitelist specific origins** — Never use `"*"` in production
-2. **Validate incoming messages** — Don't trust data from JavaScript
-3. **Use request identifiers** — Match responses to requests for concurrent operations
-4. **Check isMainFrame** — Consider restricting to main frame only
-5. **Handle errors gracefully** — Send structured error responses
-6. **Inject scripts early** — Use `addDocumentStartJavaScript` to avoid race conditions between your bridge wrapper and page scripts
+- Never use `"*"` as an origin rule in production. Whitelist specific domains.
+- Don't trust incoming messages. Validate everything on the native side.
+- Use `callbackId` (or some equivalent) to match responses to requests. Without it, concurrent calls break.
+- Check `isMainFrame` if you want to block iframes from accessing the bridge.
+- Use `addDocumentStartJavaScript` to avoid race conditions between your wrapper and page scripts.
 
-## Conclusion
+## Sample project
 
-`WebViewCompat.addWebMessageListener` provides a secure, modern alternative to `addJavascriptInterface`. By using message-passing with origin restrictions, it eliminates reflection vulnerabilities while giving you fine-grained control over which pages can communicate with native code.
-
-Combined with a structured JSON protocol, a Promise-based JavaScript wrapper, and early script injection via `addDocumentStartJavaScript`, you get a production-ready bridge that is secure, easy to extend, and pleasant to work with on both sides.
-
-If you're still using `addJavascriptInterface`, it's time to migrate.
-
-## Sample Project
-
-A complete working implementation demonstrating all concepts in this article is available on GitHub:
-
-[WebViewBridgeDemo](https://github.com/RandhirGupta/WebViewBridgeDemo) — Sample Android project showing secure WebView-to-native communication using `addWebMessageListener`.
+The full working implementation is on GitHub: [WebViewBridgeDemo](https://github.com/RandhirGupta/WebViewBridgeDemo)
 
 ## References
 
-- [WebViewCompat.WebMessageListener API Reference](https://developer.android.com/reference/androidx/webkit/WebViewCompat.WebMessageListener)
-- [WebViewCompat API Reference](https://developer.android.com/reference/kotlin/androidx/webkit/WebViewCompat)
-- [AndroidX WebKit Releases](https://developer.android.com/jetpack/androidx/releases/webkit)
+- [WebViewCompat.WebMessageListener](https://developer.android.com/reference/androidx/webkit/WebViewCompat.WebMessageListener)
+- [WebViewCompat](https://developer.android.com/reference/kotlin/androidx/webkit/WebViewCompat)
+- [AndroidX WebKit releases](https://developer.android.com/jetpack/androidx/releases/webkit)
