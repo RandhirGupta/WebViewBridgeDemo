@@ -27,12 +27,10 @@ WebViewCompat.addWebMessageListener(
 
 ### Parameters
 
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| webView | WebView | The WebView instance to attach the listener to |
-| jsObjectName | String | Name of the JavaScript object to inject (e.g., "NativeBridge") |
-| allowedOriginRules | Set\<String\> | Origins permitted to use the bridge |
-| listener | WebMessageListener | Callback that handles incoming messages |
+- **webView** *(WebView)* — The WebView instance to attach the listener to
+- **jsObjectName** *(String)* — Name of the JavaScript object to inject (e.g., "NativeBridge")
+- **allowedOriginRules** *(Set\<String\>)* — Origins permitted to use the bridge
+- **listener** *(WebMessageListener)* — Callback that handles incoming messages
 
 ### What This Method Does
 
@@ -65,13 +63,11 @@ interface WebMessageListener {
 
 ### Callback Parameters
 
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| view | WebView | The WebView that received the message |
-| message | WebMessageCompat | The message content (access via `message.data`) |
-| sourceOrigin | Uri | The origin of the page that sent the message |
-| isMainFrame | Boolean | True if message came from main frame, false if from iframe |
-| replyProxy | JavaScriptReplyProxy | Used to send responses back to JavaScript |
+- **view** *(WebView)* — The WebView that received the message
+- **message** *(WebMessageCompat)* — The message content (access via `message.data`)
+- **sourceOrigin** *(Uri)* — The origin of the page that sent the message
+- **isMainFrame** *(Boolean)* — True if message came from main frame, false if from iframe
+- **replyProxy** *(JavaScriptReplyProxy)* — Used to send responses back to JavaScript
 
 ### JavaScriptReplyProxy
 
@@ -87,26 +83,27 @@ SCHEME "://" [ HOSTNAME_PATTERN [ ":" PORT ] ]
 
 ### Valid Origin Rule Examples
 
-| Rule | Matches |
-|------|---------|
-| `https://example.com` | Only exact match: `https://example.com` |
-| `https://*.example.com` | All subdomains: `www.example.com`, `api.example.com` (but not `example.com` itself) |
-| `https://example.com:8080` | Only `example.com` on port 8080 |
-| `http://192.168.1.1` | Specific IP address |
-| `http://[::1]` | IPv6 localhost |
-| `my-app-scheme://` | Custom URL schemes |
-| `*` | All origins (not recommended for production) |
+- `https://example.com` — Only exact match: `https://example.com`
+- `https://*.example.com` — All subdomains: `www.example.com`, `api.example.com` (but not `example.com` itself)
+- `https://example.com:8080` — Only `example.com` on port 8080
+- `http://192.168.1.1` — Specific IP address
+- `http://[::1]` — IPv6 localhost
+- `my-app-scheme://` — Custom URL schemes
+- `*` — All origins (not recommended for production)
 
 ## Comparison: addJavascriptInterface vs addWebMessageListener
 
-| Aspect | addJavascriptInterface | addWebMessageListener |
-|--------|----------------------|----------------------|
-| Communication | Direct method calls | String message passing |
-| Security | Reflection vulnerabilities | No reflection exposure |
-| Origin Control | None | Built-in whitelisting |
-| Data Format | Any Java object | Strings only (JSON recommended) |
-| Response Pattern | Return values | Async via replyProxy |
-| API Level | API 1+ | Requires AndroidX WebKit |
+**Communication** — `addJavascriptInterface` uses direct method calls. `addWebMessageListener` uses string message passing.
+
+**Security** — `addJavascriptInterface` is vulnerable to reflection attacks. `addWebMessageListener` has no reflection exposure.
+
+**Origin Control** — `addJavascriptInterface` has none. `addWebMessageListener` has built-in whitelisting.
+
+**Data Format** — `addJavascriptInterface` accepts any Java object. `addWebMessageListener` uses strings only (JSON recommended).
+
+**Response Pattern** — `addJavascriptInterface` uses return values. `addWebMessageListener` uses async responses via `replyProxy`.
+
+**API Level** — `addJavascriptInterface` works from API 1+. `addWebMessageListener` requires AndroidX WebKit.
 
 ## Advantages of addWebMessageListener
 
@@ -329,20 +326,16 @@ if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
 
 A common source of confusion: the injected `NativeBridge.postMessage()` is completely different from the browser's `window.postMessage()`.
 
-| API | Purpose |
-|-----|---------|
-| `window.postMessage()` | Browser's cross-origin messaging between frames/windows |
-| `NativeBridge.postMessage()` | WebView bridge for JavaScript to native Android communication |
+- `window.postMessage()` — Browser's cross-origin messaging between frames/windows
+- `NativeBridge.postMessage()` — WebView bridge for JavaScript to native Android communication
 
 They are unrelated APIs. Don't mix them up!
 
 ## Requirements
 
-| Requirement | Version |
-|-------------|---------|
-| AndroidX WebKit | 1.6.0+ (for `addDocumentStartJavaScript`) |
-| Android System WebView | 74+ |
-| Minimum SDK | 24 |
+- **AndroidX WebKit** — 1.6.0+ (for `addDocumentStartJavaScript`)
+- **Android System WebView** — 74+
+- **Minimum SDK** — 24
 
 Add the dependency:
 
