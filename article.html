@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Beyond addJavascriptInterface: Building a Secure WebView Bridge in Android</title>
+</head>
+<body>
+<article>
+
+<h1>Beyond addJavascriptInterface: Building a Secure WebView Bridge in Android</h1>
+
+<p>If you've worked on hybrid Android apps, you've probably used <code>addJavascriptInterface</code> to let your WebView talk to native code. It works, but it has a well-known problem: on Android versions before 4.2, any JavaScript running in the WebView could exploit the injected object via reflection to call arbitrary methods. Even on newer versions, every <code>@JavascriptInterface</code> method you expose is directly callable by any script in the WebView — including scripts you didn't write.</p>
+
+<p>AndroidX WebKit offers a better alternative: <code>WebViewCompat.addWebMessageListener()</code>. Instead of exposing Java objects directly, it uses message-passing. This article covers how it works and how to build a production-ready bridge on top of it.</p>
+
+<h2>The API</h2>
+
+<pre><code>WebViewCompat.addWebMessageListener(
+    webView: WebView,
+    jsObjectName: String,
+    allowedOriginRules: Set&lt;String&gt;,
+    listener: WebViewCompat.WebMessageListener
+)</code></pre>
+
+<p>This injects a JavaScript object (named <code>jsObjectName</code>) into the global scope of every page that matches your origin rules. The object exposes two things:</p>
+
+<ul>
+<li><code>postMessage(String)</code> — sends a string from JavaScript to your native listener</li>
+<li><code>onmessage</code> — a handler that receives strings sent back from native</li>
+</ul>
+
+<p>The native listener looks like this:</p>
+
+<pre><code>interface WebMessageListener {
+    fun onPostMessage(
+        view: WebView,
+        message: WebMessageCompat,
+        sourceOrigin: Uri,
+        isMainFrame: Boolean,
+        replyProxy: JavaScriptReplyProxy
+    )
+}</code></pre>
+
+<p>When JavaScript calls <code>NativeBridge.postMessage("something")</code>, your listener fires. You read the message from <code>message.data</code>, do whatever you need, and respond using <code>replyProxy.postMessage("response")</code>. The response arrives on the JavaScript side via the <code>onmessage</code> handler.</p>
+
+<h2>Why this is better than addJavascriptInterface</h2>
+
+<p><strong>No reflection exposure.</strong> There's no Java object in the WebView's JavaScript context. Attackers can't use reflection to reach beyond what you explicitly handle in your listener.</p>
+
+<p><strong>Origin whitelisting.</strong> You specify which origins can access the bridge. If a malicious page gets loaded in your WebView, it simply can't talk to native code unless its origin is in your allowlist.</p>
+
+<p><strong>Frame awareness.</strong> The <code>isMainFrame</code> parameter tells you whether the message came from the main frame or an iframe, so you can reject messages from iframes if you want.</p>
+
+<p><strong>String-only communication.</strong> All data passes as strings. You parse what you expect and ignore everything else. This gives you a narrow, auditable API surface.</p>
+
+<h2>Origin rules</h2>
+
+<p>Each rule follows the format <code>SCHEME "://" HOSTNAME_PATTERN [ ":" PORT ]</code>:</p>
+
+<ul>
+<li><code>https://example.com</code> — exact match only</li>
+<li><code>https://*.example.com</code> — subdomains of example.com (not example.com itself)</li>
+<li><code>https://example.com:8080</code> — specific port</li>
+<li><code>http://192.168.1.1</code> — IP address</li>
+<li><code>*</code> — matches everything (don't use this in production)</li>
+</ul>
+
+<h2>Building an actual bridge</h2>
+
+<p>The raw <code>postMessage</code>/<code>onmessage</code> API only passes strings back and forth. For a real app, you need a protocol on top of it — something that lets you make named method calls, pass arguments, and match responses to requests.</p>
+
+<p>Here's what I landed on. Each message is JSON with a <code>callbackId</code>, a <code>method</code> name, and an <code>args</code> object:</p>
+
+<pre><code>{"callbackId": "cb_1_1708345123456", "method": "getDeviceInfo", "args": {}}</code></pre>
+
+<p>The native side parses this, routes to the right handler, and sends back a response with the same <code>callbackId</code>:</p>
+
+<pre><code>{"callbackId": "cb_1_1708345123456", "result": {"manufacturer": "Google", "model": "Pixel 8"}}</code></pre>
+
+<p>Or on error:</p>
+
+<pre><code>{"callbackId": "cb_1_1708345123456", "error": {"message": "Unknown method", "code": "BRIDGE_ERROR"}}</code></pre>
+
+<p>The <code>callbackId</code> is what makes concurrent calls work — without it, you can't tell which response belongs to which request.</p>
+
+<h3>Native side</h3>
+
+<p>The message handler parses the JSON and routes based on the <code>method</code> field:</p>
+
+<pre><code>private fun onMessageReceived(
+    view: WebView,
+    message: WebMessageCompat,
+    sourceOrigin: Uri,
+    isMainFrame: Boolean,
+    replyProxy: JavaScriptReplyProxy
+) {
+    val messageData = message.data ?: return
+
+    runCatching {
+        val request = JSONObject(messageData)
+        val callbackId = request.getString("callbackId")
+        val method = request.getString("method")
+        val args = request.optJSONObject("args") ?: JSONObject()
+
+        when (method) {
+            "ping" -&gt; handlePing(callbackId, replyProxy)
+            "getDeviceInfo" -&gt; handleGetDeviceInfo(callbackId, replyProxy)
+            "showToast" -&gt; handleShowToast(args, callbackId, replyProxy)
+            else -&gt; sendError(replyProxy, callbackId, "Unknown method: $method")
+        }
+    }
+}</code></pre>
+
+<p>Sending responses:</p>
+
+<pre><code>private fun sendSuccess(replyProxy: JavaScriptReplyProxy, callbackId: String, result: JSONObject) {
+    val response = JSONObject().apply {
+        put("callbackId", callbackId)
+        put("result", result)
+    }
+    replyProxy.postMessage(response.toString())
+}
+
+private fun sendError(replyProxy: JavaScriptReplyProxy, callbackId: String, errorMessage: String) {
+    val response = JSONObject().apply {
+        put("callbackId", callbackId)
+        put("error", JSONObject().apply {
+            put("message", errorMessage)
+            put("code", "BRIDGE_ERROR")
+        })
+    }
+    replyProxy.postMessage(response.toString())
+}</code></pre>
+
+<h3>JavaScript side</h3>
+
+<p>On the web side, I wrapped the low-level <code>NativeBridge</code> object with a Promise-based API. JavaScript calls go through <code>window.Native.postMessage()</code>, which generates a unique callback ID, stashes the Promise's resolve/reject in a map, and sends the JSON to native. When the response comes back, the <code>onmessage</code> handler looks up the callback ID and resolves or rejects the corresponding Promise.</p>
+
+<pre><code>(function() {
+    'use strict';
+
+    var callbacks = {};
+    var counter = 0;
+
+    function generateId() {
+        return 'cb_' + (++counter) + '_' + Date.now();
+    }
+
+    NativeBridge.onmessage = function(event) {
+        var response = JSON.parse(event.data);
+        var cb = callbacks[response.callbackId];
+        if (cb) {
+            delete callbacks[response.callbackId];
+            if (response.error) {
+                cb.reject(response.error);
+            } else {
+                cb.resolve(response.result);
+            }
+        }
+    };
+
+    window.Native = {
+        postMessage: function(message) {
+            return new Promise(function(resolve, reject) {
+                var id = generateId();
+
+                setTimeout(function() {
+                    if (callbacks[id]) {
+                        delete callbacks[id];
+                        reject(new Error('Request timeout'));
+                    }
+                }, 30000);
+
+                callbacks[id] = { resolve: resolve, reject: reject };
+
+                NativeBridge.postMessage(JSON.stringify({
+                    callbackId: id,
+                    method: message.method,
+                    args: message.args || {}
+                }));
+            });
+        }
+    };
+
+    Object.freeze(window.Native);
+})();</code></pre>
+
+<p>With this wrapper, calling native code from JavaScript looks like any other async call:</p>
+
+<pre><code>const info = await window.Native.postMessage({ method: 'getDeviceInfo' });
+console.log(info.manufacturer, info.model);
+
+await window.Native.postMessage({
+    method: 'showToast',
+    args: { message: 'Hello from WebView!', duration: 'short' }
+});</code></pre>
+
+<h2>Injecting the wrapper early</h2>
+
+<p>There's a timing issue. The web page might try to use <code>window.Native</code> before the wrapper script has been injected. If you inject it in <code>onPageFinished</code>, you're too late — page scripts may have already run.</p>
+
+<p><code>addDocumentStartJavaScript()</code> solves this. It injects your script at document start, before any page scripts execute:</p>
+
+<pre><code>if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+    WebViewCompat.addDocumentStartJavaScript(webView, BRIDGE_WRAPPER_SCRIPT, ALLOWED_ORIGINS)
+}</code></pre>
+
+<p>This requires AndroidX WebKit 1.6.0+ and a compatible System WebView.</p>
+
+<h2>Watch out: NativeBridge.postMessage vs window.postMessage</h2>
+
+<p>These are completely unrelated APIs. <code>window.postMessage()</code> is the browser's cross-origin messaging between frames and windows. <code>NativeBridge.postMessage()</code> is the WebView bridge to native Android code. Don't mix them up — the event formats and behavior are different.</p>
+
+<h2>Feature support</h2>
+
+<p>Both APIs require a runtime feature check before use:</p>
+
+<pre><code>if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
+    // Safe to use addWebMessageListener
+}</code></pre>
+
+<h2>Requirements</h2>
+
+<ul>
+<li>AndroidX WebKit 1.6.0+</li>
+<li>Android System WebView 74+</li>
+<li>minSdk 24</li>
+</ul>
+
+<pre><code>implementation("androidx.webkit:webkit:1.9.0")</code></pre>
+
+<h2>Things to keep in mind</h2>
+
+<ul>
+<li>Never use <code>"*"</code> as an origin rule in production. Whitelist specific domains.</li>
+<li>Don't trust incoming messages. Validate everything on the native side.</li>
+<li>Use <code>callbackId</code> (or some equivalent) to match responses to requests. Without it, concurrent calls break.</li>
+<li>Check <code>isMainFrame</code> if you want to block iframes from accessing the bridge.</li>
+<li>Use <code>addDocumentStartJavaScript</code> to avoid race conditions between your wrapper and page scripts.</li>
+</ul>
+
+<h2>Sample project</h2>
+
+<p>The full working implementation is on GitHub: <a href="https://github.com/RandhirGupta/WebViewBridgeDemo">WebViewBridgeDemo</a></p>
+
+<h2>References</h2>
+
+<ul>
+<li><a href="https://developer.android.com/reference/androidx/webkit/WebViewCompat.WebMessageListener">WebViewCompat.WebMessageListener</a></li>
+<li><a href="https://developer.android.com/reference/kotlin/androidx/webkit/WebViewCompat">WebViewCompat</a></li>
+<li><a href="https://developer.android.com/jetpack/androidx/releases/webkit">AndroidX WebKit releases</a></li>
+</ul>
+
+</article>
+</body>
+</html>
