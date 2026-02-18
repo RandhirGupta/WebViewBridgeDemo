@@ -31,7 +31,7 @@ WebViewCompat.addWebMessageListener(
 |-----------|------|-------------|
 | webView | WebView | The WebView instance to attach the listener to |
 | jsObjectName | String | Name of the JavaScript object to inject (e.g., "NativeBridge") |
-| allowedOriginRules | Set | Origins permitted to use the bridge |
+| allowedOriginRules | Set\<String\> | Origins permitted to use the bridge |
 | listener | WebMessageListener | Callback that handles incoming messages |
 
 ### What This Method Does
@@ -89,9 +89,9 @@ SCHEME "://" [ HOSTNAME_PATTERN [ ":" PORT ] ]
 
 | Rule | Matches |
 |------|---------|
-| `https://example.com` | example.com and subdomains (www.example.com, api.example.com) |
-| `https://.example.com` | Only exact match, no subdomains |
-| `https://example.com:8080` | Only example.com on port 8080 |
+| `https://example.com` | Only exact match: `https://example.com` |
+| `https://*.example.com` | All subdomains: `www.example.com`, `api.example.com` (but not `example.com` itself) |
+| `https://example.com:8080` | Only `example.com` on port 8080 |
 | `http://192.168.1.1` | Specific IP address |
 | `http://[::1]` | IPv6 localhost |
 | `my-app-scheme://` | Custom URL schemes |
@@ -130,6 +130,191 @@ The `isMainFrame` parameter lets you restrict communication to the main frame on
 
 The JavaScript object is available immediately when the page begins to load — no need to wait for page load events or worry about race conditions.
 
+## Putting It All Together: A Practical Implementation
+
+The API reference above covers the building blocks. Now let's see how to combine them into a real, usable bridge with a structured request/response protocol and a Promise-based JavaScript API.
+
+### Step 1: Define a Request/Response Protocol
+
+Raw string messages aren't enough for real apps. Define a JSON protocol so JavaScript can make named method calls and receive structured responses:
+
+**Request** (JavaScript → Native)
+
+```json
+{
+  "callbackId": "cb_1_1708345123456",
+  "method": "getDeviceInfo",
+  "args": {}
+}
+```
+
+**Success Response** (Native → JavaScript)
+
+```json
+{
+  "callbackId": "cb_1_1708345123456",
+  "result": { "manufacturer": "Google", "model": "Pixel 8" }
+}
+```
+
+**Error Response** (Native → JavaScript)
+
+```json
+{
+  "callbackId": "cb_1_1708345123456",
+  "error": { "message": "Unknown method", "code": "BRIDGE_ERROR" }
+}
+```
+
+The `callbackId` ties each response back to the original request, enabling concurrent operations without mixups.
+
+### Step 2: Handle Messages and Route Methods on the Native Side
+
+```kotlin
+private fun onMessageReceived(
+    view: WebView,
+    message: WebMessageCompat,
+    sourceOrigin: Uri,
+    isMainFrame: Boolean,
+    replyProxy: JavaScriptReplyProxy
+) {
+    val messageData = message.data ?: return
+
+    runCatching {
+        val request = JSONObject(messageData)
+        val callbackId = request.getString("callbackId")
+        val method = request.getString("method")
+        val args = request.optJSONObject("args") ?: JSONObject()
+
+        when (method) {
+            "ping" -> handlePing(callbackId, replyProxy)
+            "getDeviceInfo" -> handleGetDeviceInfo(callbackId, replyProxy)
+            "showToast" -> handleShowToast(args, callbackId, replyProxy)
+            else -> sendError(replyProxy, callbackId, "Unknown method: $method")
+        }
+    }
+}
+
+private fun sendSuccess(
+    replyProxy: JavaScriptReplyProxy,
+    callbackId: String,
+    result: JSONObject
+) {
+    val response = JSONObject().apply {
+        put("callbackId", callbackId)
+        put("result", result)
+    }
+    replyProxy.postMessage(response.toString())
+}
+
+private fun sendError(
+    replyProxy: JavaScriptReplyProxy,
+    callbackId: String,
+    errorMessage: String
+) {
+    val response = JSONObject().apply {
+        put("callbackId", callbackId)
+        put("error", JSONObject().apply {
+            put("message", errorMessage)
+            put("code", "BRIDGE_ERROR")
+        })
+    }
+    replyProxy.postMessage(response.toString())
+}
+```
+
+### Step 3: Build a Promise-Based JavaScript Wrapper
+
+The raw `NativeBridge.postMessage()` API only sends strings. Wrapping it with Promises gives a clean, async/await-friendly API for the web layer:
+
+```javascript
+(function() {
+    'use strict';
+
+    var callbacks = {};
+    var counter = 0;
+
+    function generateId() {
+        return 'cb_' + (++counter) + '_' + Date.now();
+    }
+
+    // Listen for native responses
+    NativeBridge.onmessage = function(event) {
+        var response = JSON.parse(event.data);
+        var cb = callbacks[response.callbackId];
+        if (cb) {
+            delete callbacks[response.callbackId];
+            if (response.error) {
+                cb.reject(response.error);
+            } else {
+                cb.resolve(response.result);
+            }
+        }
+    };
+
+    // Public API
+    window.Native = {
+        postMessage: function(message) {
+            return new Promise(function(resolve, reject) {
+                var id = generateId();
+
+                // Timeout after 30 seconds
+                setTimeout(function() {
+                    if (callbacks[id]) {
+                        delete callbacks[id];
+                        reject(new Error('Request timeout'));
+                    }
+                }, 30000);
+
+                callbacks[id] = { resolve: resolve, reject: reject };
+
+                NativeBridge.postMessage(JSON.stringify({
+                    callbackId: id,
+                    method: message.method,
+                    args: message.args || {}
+                }));
+            });
+        }
+    };
+
+    Object.freeze(window.Native);
+})();
+```
+
+Now calling native methods from JavaScript is clean and intuitive:
+
+```javascript
+// Simple call
+const info = await window.Native.postMessage({ method: 'getDeviceInfo' });
+console.log(info.manufacturer, info.model);
+
+// Call with arguments
+await window.Native.postMessage({
+    method: 'showToast',
+    args: { message: 'Hello from WebView!', duration: 'short' }
+});
+```
+
+### Step 4: Inject the Wrapper Early with addDocumentStartJavaScript
+
+There's a timing problem: the web page may try to call `window.Native` before the bridge wrapper has been injected. AndroidX WebKit solves this with `addDocumentStartJavaScript()`, which injects scripts at document start — before any page scripts execute:
+
+```kotlin
+private fun injectBridgeWrapper() {
+    if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+        WebViewCompat.addDocumentStartJavaScript(
+            webView,
+            BRIDGE_WRAPPER_SCRIPT,  // The JS wrapper from Step 3
+            ALLOWED_ORIGINS
+        )
+    }
+}
+```
+
+This ensures `window.Native` is available the moment any page script runs — no race conditions, no `DOMContentLoaded` waiting.
+
+> **Note:** `addDocumentStartJavaScript` requires AndroidX WebKit 1.6.0+ and a compatible Android System WebView.
+
 ## Feature Support
 
 This API requires checking feature availability before use:
@@ -155,14 +340,14 @@ They are unrelated APIs. Don't mix them up!
 
 | Requirement | Version |
 |-------------|---------|
-| AndroidX WebKit | 1.4.0+ |
+| AndroidX WebKit | 1.6.0+ (for `addDocumentStartJavaScript`) |
 | Android System WebView | 74+ |
-| Minimum SDK | 21 |
+| Minimum SDK | 24 |
 
 Add the dependency:
 
-```groovy
-implementation 'androidx.webkit:webkit:1.9.0'
+```kotlin
+implementation("androidx.webkit:webkit:1.9.0")
 ```
 
 ## Best Practices
@@ -172,10 +357,13 @@ implementation 'androidx.webkit:webkit:1.9.0'
 3. **Use request identifiers** — Match responses to requests for concurrent operations
 4. **Check isMainFrame** — Consider restricting to main frame only
 5. **Handle errors gracefully** — Send structured error responses
+6. **Inject scripts early** — Use `addDocumentStartJavaScript` to avoid race conditions between your bridge wrapper and page scripts
 
 ## Conclusion
 
 `WebViewCompat.addWebMessageListener` provides a secure, modern alternative to `addJavascriptInterface`. By using message-passing with origin restrictions, it eliminates reflection vulnerabilities while giving you fine-grained control over which pages can communicate with native code.
+
+Combined with a structured JSON protocol, a Promise-based JavaScript wrapper, and early script injection via `addDocumentStartJavaScript`, you get a production-ready bridge that is secure, easy to extend, and pleasant to work with on both sides.
 
 If you're still using `addJavascriptInterface`, it's time to migrate.
 
